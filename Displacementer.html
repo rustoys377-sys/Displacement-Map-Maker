@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Image Displacement Maker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <!-- Dependency: OBJ Exporter for geometry and UV preservation -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/exporters/OBJExporter.js"></script>
+    <style>
+        /* Custom styles for a clean, dark interface */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1f2937; /* Dark Slate Gray */
+            color: #f9fafb;
+            margin: 0;
+            padding: 0;
+            overflow: hidden; /* Prevent body scroll */
+        }
+        #app-container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        #controls {
+            flex-shrink: 0;
+            padding: 1rem;
+            background-color: #111827; /* Very Dark Blue */
+            border-bottom: 2px solid #374151;
+        }
+        #webgl-container {
+            flex-grow = 1;
+            min-height: 50vh; /* Ensure canvas has minimum height on mobile */
+        }
+        canvas {
+            display: block;
+        }
+        .file-input-group label {
+            display: block;
+            margin-bottom: 0.25rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: #d1d5db;
+        }
+    </style>
+</head>
+<body>
+    <div id="app-container">
+        <!-- Controls Panel -->
+        <div id="controls" class="shadow-lg">
+            <h1 class="text-xl font-bold mb-3 text-indigo-400">3D Displacement Scene Maker</h1>
+            <p class="text-sm text-gray-400 mb-4">
+                Upload a Color Image and a Grayscale Depth Map, then adjust the intensity below to minimize stretching.
+            </p>
+            
+            <!-- File Inputs -->
+            <div class="flex flex-col md:flex-row gap-4 mb-4">
+                
+                <!-- Color Map Input -->
+                <div class="file-input-group flex-1">
+                    <label for="color-map-file">1. Color Image (Texture)</label>
+                    <input type="file" id="color-map-file" accept="image/*" class="w-full text-sm text-gray-300
+                        file:mr-4 file:py-2 file:px-4
+                        file:rounded-full file:border-0
+                        file:text-sm file:font-semibold
+                        file:bg-indigo-500 file:text-white
+                        hover:file:bg-indigo-600
+                    "/>
+                </div>
+
+                <!-- Depth Map Input -->
+                <div class="file-input-group flex-1">
+                    <label for="depth-map-file">2. Depth Map (Grayscale)</label>
+                    <input type="file" id="depth-map-file" accept="image/*" class="w-full text-sm text-gray-300
+                        file:mr-4 file:py-2 file:px-4
+                        file:rounded-full file:border-0
+                        file:text-sm file:font-semibold
+                        file:bg-indigo-500 file:text-white
+                        hover:file:bg-indigo-600
+                    "/>
+                </div>
+            </div>
+
+            <!-- Controls and Action Buttons -->
+            <div class="flex flex-col lg:flex-row gap-4 items-center">
+                <!-- Intensity Slider -->
+                <div class="flex-1 w-full lg:w-auto">
+                    <label for="displacement-scale" class="text-sm font-medium text-gray-400 block mb-1">
+                        Displacement Intensity: <span id="scale-value">5.0</span>
+                    </label>
+                    <input type="range" id="displacement-scale" min="0.1" max="30" step="0.1" value="5.0" 
+                           class="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer range-lg">
+                </div>
+
+                <!-- Action Button Group -->
+                <div class="flex gap-2 w-full lg:w-auto">
+                    <button id="generate-button" disabled
+                        class="bg-green-600 text-white font-bold py-2 px-4 rounded-xl shadow-md hover:bg-green-700 transition duration-150 disabled:bg-gray-500 flex-1">
+                        Generate 3D Mesh
+                    </button>
+                    <button id="simulate-button"
+                        class="bg-blue-600 text-white font-bold py-2 px-4 rounded-xl shadow-md hover:bg-blue-700 transition duration-150 flex-1">
+                        Simulate Depth (Demo)
+                    </button>
+                    <!-- Download Button - Now exports a single OBJ file (Geometry and UVs) -->
+                    <button id="download-button" disabled
+                        class="bg-purple-600 text-white font-bold py-2 px-4 rounded-xl shadow-md hover:bg-purple-700 transition duration-150 disabled:bg-gray-500 flex-1">
+                        Download OBJ File
+                    </button>
+                </div>
+            </div>
+
+            <div class="mt-3 text-xs text-yellow-400 text-center" id="status-message">
+                Please upload both files or use the 'Simulate Depth' button.
+            </div>
+        </div>
+
+        <!-- 3D Viewer Container -->
+        <div id="webgl-container"></div>
+    </div>
+
+    <script>
+        // Global variables for Three.js
+        let scene, camera, renderer, controls;
+        let mesh;
+        let colorMapTexture = null;
+        let depthMapTexture = null;
+        let colorMapFile = null; // Stores the original file object for texture download
+        const SEGMENTS = 512; // High resolution for smoother displacement
+        let displacementScale = 5.0; // Dynamic scale
+
+        // Elements
+        const webglContainer = document.getElementById('webgl-container');
+        const colorMapInput = document.getElementById('color-map-file');
+        const depthMapInput = document.getElementById('depth-map-file');
+        const generateButton = document.getElementById('generate-button');
+        const simulateButton = document.getElementById('simulate-button');
+        const downloadButton = document.getElementById('download-button');
+        const scaleSlider = document.getElementById('displacement-scale');
+        const scaleValueDisplay = document.getElementById('scale-value');
+        const statusMessage = document.getElementById('status-message');
+
+        // Utility function for exponential backoff (not used here but kept as best practice)
+        async function fetchWithRetry(url, options, maxRetries = 5) {
+            let attempt = 0;
+            while (attempt < maxRetries) {
+                try {
+                    const response = await fetch(url, options);
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    return response;
+                } catch (error) {
+                    attempt++;
+                    if (attempt >= maxRetries) {
+                        console.error('Max retries reached:', error);
+                        throw error;
+                    }
+                    const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
+                    console.warn(`Attempt ${attempt} failed. Retrying in ${delay.toFixed(0)}ms...`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        }
+
+        /**
+         * Converts a File object (image) into a Three.js Texture.
+         * @param {File} file - The image file to load.
+         * @returns {Promise<THREE.Texture>}
+         */
+        function loadTextureFromFile(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const textureLoader = new THREE.TextureLoader();
+                    textureLoader.load(event.target.result,
+                        // onLoad
+                        (texture) => {
+                            texture.wrapS = texture.wrapT = THREE.ClampToEdgeWrapping;
+                            texture.magFilter = THREE.LinearFilter;
+                            texture.minFilter = THREE.LinearMipMapLinearFilter;
+                            resolve(texture);
+                        },
+                        // onProgress (unused here)
+                        undefined,
+                        // onError
+                        (error) => {
+                            console.error('Error loading texture:', error);
+                            reject(new Error('Failed to load texture.'));
+                        }
+                    );
+                };
+                reader.onerror = (error) => reject(error);
+                reader.readAsDataURL(file);
+            });
+        }
+
+        /**
+         * Creates a simple, procedural radial gradient texture for demonstration.
+         * @returns {THREE.Texture}
+         */
+        function createSimulatedDepthTexture() {
+            const size = 512;
+            const data = new Uint8Array(size * size * 3);
+            
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    const dx = (x / size) - 0.5;
+                    const dy = (y / size) - 0.5;
+                    const dist = Math.sqrt(dx * dx + dy * dy) * 2;
+                    const value = Math.max(0, 1 - dist); 
+                    const intensity = Math.pow(value, 2);
+
+                    const colorValue = Math.round(intensity * 255);
+                    const i = (y * size + x) * 3;
+
+                    data[i] = colorValue;
+                    data[i + 1] = colorValue;
+                    data[i + 2] = colorValue;
+                }
+            }
+
+            const texture = new THREE.DataTexture(data, size, size, THREE.RGBFormat);
+            texture.needsUpdate = true;
+            texture.wrapS = texture.wrapT = THREE.ClampToEdgeWrapping;
+            return texture;
+        }
+
+        /**
+         * Reads the raw pixel data from the depth map texture using a hidden canvas.
+         * @param {THREE.Texture} texture - The depth map texture.
+         * @returns {Uint8ClampedArray | null} - RGBA pixel data array.
+         */
+        function getPixelData(texture) {
+            if (!texture || !texture.image) return null;
+
+            const image = texture.image;
+            const canvas = document.createElement('canvas');
+            canvas.width = SEGMENTS;
+            canvas.height = SEGMENTS;
+            const context = canvas.getContext('2d');
+            
+            // Draw the texture image onto the canvas, scaling to our SEGMENTS resolution
+            context.drawImage(image, 0, 0, SEGMENTS, SEGMENTS);
+
+            try {
+                // Read the pixel data (RGBA)
+                return context.getImageData(0, 0, SEGMENTS, SEGMENTS).data;
+            } catch (e) {
+                console.error("Failed to read image data from canvas. CORS issue possible if using external image URLs.", e);
+                return null;
+            }
+        }
+        
+        /**
+         * Creates a physically displaced geometry object for export.
+         * This manually calculates and applies the displacement to the vertex positions.
+         * IMPORTANT: PlaneGeometry includes UVs, which are preserved here for OBJ export.
+         * @returns {THREE.BufferGeometry | null} - The displaced geometry.
+         */
+        function getExportGeometry() {
+            if (!depthMapTexture || !depthMapTexture.image) {
+                console.error("Depth map not available for export.");
+                return null;
+            }
+
+            // 1. Get raw pixel data (RGBA)
+            const depthData = getPixelData(depthMapTexture); 
+            if (!depthData) return null;
+            
+            // 2. Create a new flat geometry instance to physically modify
+            // PlaneGeometry automatically generates UVs (stored in the 'uv' attribute)
+            const exportGeometry = new THREE.PlaneGeometry(20, 20, SEGMENTS, SEGMENTS);
+
+            const positions = exportGeometry.attributes.position.array;
+            const numVertices = exportGeometry.attributes.position.count;
+            let minZ = Infinity;
+
+            // 3. Iterate through vertices and apply displacement (Z-axis)
+            for (let i = 0; i < numVertices; i++) {
+                
+                // PlaneGeometry vertices are generated from -10 to 10 on X/Y.
+                const x = positions[i * 3 + 0]; // X coordinate
+                const y = positions[i * 3 + 1]; // Y coordinate
+
+                // Normalize UV (0 to 1, then flip Y for correct texture mapping)
+                const u = (x + 10) / 20;
+                const v = 1 - ((y + 10) / 20); 
+
+                // Map UV to pixel index (clamped to 511)
+                const pixelX = Math.min(SEGMENTS - 1, Math.floor(u * SEGMENTS));
+                const pixelY = Math.min(SEGMENTS - 1, Math.floor(v * SEGMENTS));
+                const pixelIndex = (pixelY * SEGMENTS + pixelX) * 4;
+                
+                // Get grayscale intensity (0.0 to 1.0) from the Red channel
+                const intensity = depthData[pixelIndex] / 255.0; 
+
+                // Calculate displacement: scale * intensity
+                const displacement = intensity * displacementScale;
+                positions[i * 3 + 2] = displacement; 
+                
+                minZ = Math.min(minZ, displacement);
+            }
+            
+            // 4. Offset the entire mesh so the lowest point rests on Z=0
+            const baseOffset = -minZ;
+            for (let i = 0; i < numVertices; i++) {
+                positions[i * 3 + 2] += baseOffset;
+            }
+
+            exportGeometry.attributes.position.needsUpdate = true;
+            // Recalculate normals after displacement
+            exportGeometry.computeVertexNormals(); 
+            
+            return exportGeometry;
+        }
+
+        /**
+         * Updates the 3D mesh with new color and depth textures (FOR VISUALIZATION).
+         */
+        function updateMesh() {
+            if (!colorMapTexture || !depthMapTexture) {
+                statusMessage.textContent = 'Need both a color image and a depth map to generate the mesh.';
+                downloadButton.disabled = true;
+                return;
+            }
+
+            // Dispose of old mesh if it exists
+            if (mesh) {
+                scene.remove(mesh);
+                mesh.geometry.dispose();
+                mesh.material.dispose();
+                mesh = null;
+            }
+
+            // 1. Geometry: A simple plane with high resolution for displacement (20x20 units)
+            const geometry = new THREE.PlaneGeometry(20, 20, SEGMENTS, SEGMENTS); 
+
+            // 2. Material: Standard material supports displacement mapping (VISUAL EFFECT ONLY)
+            const material = new THREE.MeshStandardMaterial({
+                map: colorMapTexture,
+                displacementMap: depthMapTexture,
+                displacementScale: displacementScale, // Use the current dynamic scale
+                side: THREE.DoubleSide
+            });
+
+            // 3. Create the mesh
+            mesh = new THREE.Mesh(geometry, material);
+
+            // Rotate the plane to face the camera flatly (X-Z plane with Y-up)
+            mesh.rotation.x = -Math.PI / 2;
+            mesh.position.y = -5; // Lower it slightly
+
+            // Add to the scene
+            scene.add(mesh);
+            downloadButton.disabled = false;
+            statusMessage.textContent = `3D Mesh generated successfully with scale: ${displacementScale.toFixed(1)}. Use your mouse to rotate.`;
+        }
+        
+        /**
+         * Helper to trigger a file download.
+         */
+        function triggerDownload(blob, filename) {
+            const link = document.createElement('a');
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.href = URL.createObjectURL(blob);
+            link.download = filename;
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        /**
+         * Converts the physically displaced geometry into a single OBJ file (including UVs).
+         */
+        function downloadModel() {
+            if (!mesh) {
+                statusMessage.textContent = 'Error: No mesh found to download. Please click "Generate 3D Mesh" first.';
+                return;
+            }
+
+            statusMessage.textContent = 'Preparing model for download... (OBJ includes geometry and UV data)';
+            downloadButton.disabled = true; 
+
+            // 1. Get the geometry with physically displaced vertices
+            const geometryToExport = getExportGeometry();
+
+            if (!geometryToExport) {
+                statusMessage.textContent = 'Error: Failed to create geometry for export.';
+                downloadButton.disabled = false;
+                return;
+            }
+
+            // Setup for export
+            const exporter = new THREE.OBJExporter(); // <-- Using OBJExporter
+            // Create temporary mesh for exporter
+            const tempMaterial = new THREE.MeshBasicMaterial(); 
+            const tempMesh = new THREE.Mesh(geometryToExport, tempMaterial);
+            tempMesh.name = 'DisplacedMesh';
+            
+            // Apply rotation to the temporary MESH object for export consistency.
+            tempMesh.rotation.x = -Math.PI / 2;
+
+            try {
+                // 2. Parse the mesh and export as OBJ string
+                const objString = exporter.parse(tempMesh);
+
+                // 3. Cleanup temporary objects immediately
+                geometryToExport.dispose(); 
+                tempMaterial.dispose();
+                
+                // 4. Create Blob and trigger download
+                const blob = new Blob([objString], { type: 'text/plain' });
+                triggerDownload(blob, 'DisplacedMesh.obj'); // <-- Downloading as .obj
+
+                statusMessage.textContent = 'Download complete! You received a **.obj** file. Remember to use your original color image as the texture file!';
+                downloadButton.disabled = false;
+                
+            } catch (e) {
+                console.error("Download Error:", e);
+                statusMessage.textContent = 'Error during OBJ export. See console for details.';
+                downloadButton.disabled = false;
+            }
+        }
+
+
+        /**
+         * Updates only the displacement scale of the existing mesh.
+         */
+        function updateDisplacementScale() {
+            // Update the global variable
+            displacementScale = parseFloat(scaleSlider.value);
+            
+            // Update the display text
+            scaleValueDisplay.textContent = displacementScale.toFixed(1);
+
+            if (mesh && mesh.material.displacementMap) {
+                
+                // Update the material property directly (for visualization only)
+                mesh.material.displacementScale = displacementScale;
+            }
+            
+            // Update the status message if files are loaded, prompting for a re-generate
+            if (colorMapTexture && depthMapTexture) {
+                 statusMessage.textContent = `Displacement scale adjusted to ${displacementScale.toFixed(1)}. Click "Generate 3D Mesh" to apply visually.`;
+            }
+        }
+
+
+        // --- Three.js Initialization ---
+
+        function init() {
+            // Scene setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x1f2937);
+
+            // Camera setup
+            camera = new THREE.PerspectiveCamera(75, webglContainer.clientWidth / webglContainer.clientHeight, 0.1, 1000);
+            camera.position.set(0, 15, 15);
+
+            // Renderer setup
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(webglContainer.clientWidth, webglContainer.clientHeight);
+            webglContainer.appendChild(renderer.domElement);
+
+            // Lighting (Standard Material needs light)
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            scene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5);
+            directionalLight.position.set(5, 10, 7.5);
+            scene.add(directionalLight);
+
+            // Controls
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true; // smooth out movement
+            controls.dampingFactor = 0.05;
+            controls.screenSpacePanning = false;
+            controls.maxPolarAngle = Math.PI / 2; // Prevent going below the ground
+
+            // Start the default mesh (a flat plane until images are loaded)
+            const defaultGeometry = new THREE.PlaneGeometry(20, 20, 1, 1);
+            const defaultMaterial = new THREE.MeshStandardMaterial({ color: 0x374151, side: THREE.DoubleSide });
+            mesh = new THREE.Mesh(defaultGeometry, defaultMaterial);
+            mesh.rotation.x = -Math.PI / 2;
+            mesh.position.y = -5;
+            scene.add(mesh);
+
+            // Event Listeners
+            window.addEventListener('resize', onWindowResize);
+            colorMapInput.addEventListener('change', handleFileChange);
+            depthMapInput.addEventListener('change', handleFileChange);
+            generateButton.addEventListener('click', updateMesh);
+            simulateButton.addEventListener('click', handleSimulateDepth);
+            scaleSlider.addEventListener('input', updateDisplacementScale); // Slider listener
+            downloadButton.addEventListener('click', downloadModel); // Download listener
+
+            // Initialize slider display
+            updateDisplacementScale();
+
+            // Check if both files are loaded initially
+            checkFilesLoaded();
+
+            // Start animation loop
+            animate();
+        }
+
+        // --- Event Handlers & Helpers ---
+
+        function onWindowResize() {
+            camera.aspect = webglContainer.clientWidth / webglContainer.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(webglContainer.clientWidth, webglContainer.clientHeight);
+        }
+
+        function checkFilesLoaded() {
+            const hasColor = colorMapInput.files.length > 0;
+            const hasDepth = depthMapInput.files.length > 0;
+            
+            if (hasColor && hasDepth) {
+                generateButton.disabled = false;
+                statusMessage.textContent = 'Files ready. Click "Generate 3D Mesh".';
+            } else {
+                generateButton.disabled = true;
+                downloadButton.disabled = true; // Ensure download is disabled initially
+                statusMessage.textContent = 'Please upload both files or use the "Simulate Depth" button.';
+            }
+        }
+
+        async function handleFileChange(event) {
+            checkFilesLoaded();
+            const file = event.target.files[0];
+            if (!file) return;
+
+            statusMessage.textContent = 'Loading texture...';
+
+            try {
+                const texture = await loadTextureFromFile(file);
+                
+                if (event.target.id === 'color-map-file') {
+                    colorMapTexture = texture;
+                    colorMapFile = file; // Store the file object
+                    // Pre-load a default depth map if only color is provided
+                    if (!depthMapTexture && depthMapInput.files.length === 0) {
+                        depthMapTexture = createSimulatedDepthTexture();
+                        statusMessage.textContent = 'Color map loaded. Using simulated depth. Click Generate.';
+                        generateButton.disabled = false;
+                    } else if (depthMapTexture) {
+                        generateButton.disabled = false;
+                        statusMessage.textContent = 'Both files loaded. Click Generate 3D Mesh.';
+                    }
+                } else if (event.target.id === 'depth-map-file') {
+                    depthMapTexture = texture;
+                }
+                checkFilesLoaded();
+
+            } catch (error) {
+                statusMessage.textContent = `Error loading file: ${error.message}`;
+            }
+        }
+        
+        async function handleSimulateDepth() {
+            // Create a placeholder color texture for the simulation
+            if (!colorMapTexture) {
+                 statusMessage.textContent = 'Simulating... Please also upload a color image to see the texture on the mesh.';
+                 // Create a placeholder color (a solid gray texture)
+                 const size = 16;
+                 const data = new Uint8Array(size * size * 3);
+                 for (let i = 0; i < data.length; i += 3) {
+                    data[i] = 150;
+                    data[i+1] = 150;
+                    data[i+2] = 150;
+                 }
+                 colorMapTexture = new THREE.DataTexture(data, size, size, THREE.RGBFormat);
+                 colorMapTexture.needsUpdate = true;
+            }
+            
+            // Generate the procedural depth map
+            depthMapTexture = createSimulatedDepthTexture();
+            
+            // Clear file inputs so the button status reflects the simulated state
+            colorMapInput.value = '';
+            depthMapInput.value = '';
+            colorMapFile = null; // Clear the stored file if simulating
+            
+            generateButton.disabled = false;
+            statusMessage.textContent = 'Simulated depth map created. Click "Generate 3D Mesh".';
+        }
+
+        // --- Animation Loop ---
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update(); // only required if controls.enableDamping is set to true
+            renderer.render(scene, camera);
+        }
+
+        // Initialize Three.js on load
+        window.onload = init;
+
+    </script>
+</body>
+</html>
